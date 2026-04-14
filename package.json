@@ -1,0 +1,29 @@
+{
+  "name": "openclaw-tiktok",
+  "version": "1.0.0",
+  "description": "TikTok integration plugin for OpenClaw — video/photo publishing, feed management, analytics, comment reading, and hashtag research via the TikTok API v2",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "lint": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.1.0"
+  },
+  "devDependencies": {
+    "openclaw": "workspace:*",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.32.0"
+  },
+  "openclaw": {
+    "extensions": ["./dist/index.js"]
+  }
+}

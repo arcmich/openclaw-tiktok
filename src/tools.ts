@@ -1,6 +1,8 @@
 import type { TikTokApiClient } from "./api-client.js";
 import type { PostInfo, PrivacyLevel } from "./types.js";
 import type { Config } from "./config-schema.js";
+import { predictViralScore, type ViralScoreInput } from "./viral-predictor.js";
+import type { PostScheduler } from "./scheduler.js";
 
 const PRIVACY_ENUM = [
   "PUBLIC_TO_EVERYONE",
@@ -25,7 +27,11 @@ function makePostInfo(
  * management capabilities: user info, feed, publishing, status polling,
  * token refresh, and (optionally) research tools.
  */
-export function buildTools(client: TikTokApiClient, cfg: Config) {
+export function buildTools(
+  client: TikTokApiClient,
+  cfg: Config,
+  scheduler: PostScheduler
+) {
   const core = [
     // ── Account ──────────────────────────────────────────────────────────────
 
@@ -563,6 +569,410 @@ export function buildTools(client: TikTokApiClient, cfg: Config) {
             commentsEnabled: true,
             privacyLevel,
           },
+        };
+      },
+    },
+
+    // ── Viral predictor ────────────────────────────────────────────────────
+
+    {
+      name: "tiktok_predict_viral_score",
+      description:
+        "Score a planned TikTok post against the 2026 FYP algorithm signals " +
+        "before you post it. Returns a 0–100 score, per-factor breakdown, " +
+        "and actionable suggestions. " +
+        "For the most accurate score, first run tiktok_find_trending_audio " +
+        "(for musicId comparison) and tiktok_find_optimal_post_time " +
+        "(for timing score), then pass those results here.",
+      parameters: {
+        type: "object",
+        required: ["caption"],
+        properties: {
+          caption: {
+            type: "string",
+            description: "The full caption text you plan to use, including hashtags",
+          },
+          musicId: {
+            type: "string",
+            description: "TikTok music ID you plan to use on this video (optional)",
+          },
+          videoDurationSecs: {
+            type: "number",
+            description: "Length of the video in seconds (strongly affects completion score)",
+          },
+          plannedPostHourUTC: {
+            type: "number",
+            description: "UTC hour (0–23) you plan to publish — e.g. 14 for 2pm UTC",
+          },
+          trendingMusicIds: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "music_id list from tiktok_find_trending_audio — enables research-backed audio score",
+          },
+          nicheViralHashtags: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "hashtag_names from tiktok_find_viral_videos — enables research-backed hashtag score",
+          },
+          optimalPostHoursUTC: {
+            type: "array",
+            items: { type: "number" },
+            description:
+              "hourUTC list from tiktok_find_optimal_post_time — enables personalised timing score",
+          },
+        },
+      },
+      execute: async (input: ViralScoreInput) => predictViralScore(input),
+    },
+
+    // ── Scheduler ──────────────────────────────────────────────────────────
+
+    {
+      name: "tiktok_schedule_post",
+      description:
+        "Queue a video to be published automatically at a specific future date " +
+        "and time. The OpenClaw plugin scheduler checks every 30 seconds and " +
+        "submits the post when the window arrives. " +
+        "Combine with tiktok_predict_viral_score to verify the post scores well " +
+        "before queuing, and tiktok_find_optimal_post_time to pick the best hour.",
+      parameters: {
+        type: "object",
+        required: ["videoUrl", "scheduledAt"],
+        properties: {
+          videoUrl: {
+            type: "string",
+            description: "Publicly accessible HTTPS URL of the video",
+          },
+          scheduledAt: {
+            type: "string",
+            description:
+              "ISO 8601 datetime to publish, e.g. \"2026-04-15T14:00:00Z\"",
+          },
+          caption: {
+            type: "string",
+            description: "Video caption with hashtags",
+          },
+          privacyLevel: {
+            type: "string",
+            enum: PRIVACY_ENUM,
+            description: `Privacy level (default: ${cfg.defaultPrivacyLevel ?? "SELF_ONLY"})`,
+          },
+          disableDuet: { type: "boolean" },
+          disableStitch: { type: "boolean" },
+          disableComment: { type: "boolean" },
+        },
+      },
+      execute: async ({
+        videoUrl,
+        scheduledAt,
+        caption,
+        privacyLevel,
+        disableDuet = false,
+        disableStitch = false,
+        disableComment = false,
+      }: {
+        videoUrl: string;
+        scheduledAt: string;
+        caption?: string;
+        privacyLevel?: PrivacyLevel;
+        disableDuet?: boolean;
+        disableStitch?: boolean;
+        disableComment?: boolean;
+      }) => {
+        const scheduledAtMs = new Date(scheduledAt).getTime();
+        if (isNaN(scheduledAtMs)) {
+          throw new Error(`Invalid scheduledAt date: "${scheduledAt}". Use ISO 8601 format.`);
+        }
+
+        const postInfo = makePostInfo(cfg, {
+          ...(caption ? { title: caption } : {}),
+          ...(privacyLevel ? { privacy_level: privacyLevel } : {}),
+          disable_duet: disableDuet,
+          disable_stitch: disableStitch,
+          disable_comment: disableComment,
+        });
+
+        const queued = scheduler.schedule(videoUrl, postInfo, scheduledAtMs);
+
+        return {
+          id: queued.id,
+          status: queued.status,
+          scheduledAt: new Date(queued.scheduledAtMs).toISOString(),
+          message: `Post queued — will publish at ${new Date(queued.scheduledAtMs).toUTCString()}`,
+        };
+      },
+    },
+
+    {
+      name: "tiktok_list_scheduled_posts",
+      description:
+        "List all posts in the scheduler queue, optionally filtered by status " +
+        "(PENDING, PUBLISHING, PUBLISHED, FAILED, CANCELLED).",
+      parameters: {
+        type: "object",
+        properties: {
+          status: {
+            type: "string",
+            enum: ["PENDING", "PUBLISHING", "PUBLISHED", "FAILED", "CANCELLED"],
+            description: "Filter by status (omit for all posts)",
+          },
+        },
+      },
+      execute: async ({ status }: { status?: "PENDING" | "PUBLISHING" | "PUBLISHED" | "FAILED" | "CANCELLED" }) => {
+        const posts = scheduler.list(status);
+        return {
+          count: posts.length,
+          posts: posts.map((p) => ({
+            id: p.id,
+            status: p.status,
+            scheduledAt: new Date(p.scheduledAtMs).toISOString(),
+            caption: (p.postInfo.title ?? "").slice(0, 80),
+            publishId: p.publishId,
+            postIds: p.postIds,
+            error: p.error,
+          })),
+        };
+      },
+    },
+
+    {
+      name: "tiktok_cancel_scheduled_post",
+      description: "Cancel a pending scheduled post before it publishes.",
+      parameters: {
+        type: "object",
+        required: ["id"],
+        properties: {
+          id: {
+            type: "string",
+            description: "The scheduler post id from tiktok_schedule_post or tiktok_list_scheduled_posts",
+          },
+        },
+      },
+      execute: async ({ id }: { id: string }) => {
+        const post = scheduler.cancel(id);
+        return { id: post.id, status: post.status, message: "Post cancelled successfully." };
+      },
+    },
+
+    {
+      name: "tiktok_post_at_optimal_time",
+      description:
+        "One-shot growth pipeline: analyses your account's posting history to " +
+        "find the best upcoming UTC hour, scores the video with the viral predictor, " +
+        "and queues it for that optimal window — all in a single call. " +
+        "Runs tiktok_find_optimal_post_time + tiktok_predict_viral_score internally.",
+      parameters: {
+        type: "object",
+        required: ["videoUrl", "caption"],
+        properties: {
+          videoUrl: {
+            type: "string",
+            description: "Publicly accessible HTTPS URL of the video",
+          },
+          caption: {
+            type: "string",
+            description: "Caption text with hashtags",
+          },
+          privacyLevel: {
+            type: "string",
+            enum: PRIVACY_ENUM,
+            description: `Privacy level (default: ${cfg.defaultPrivacyLevel ?? "SELF_ONLY"})`,
+          },
+          videoDurationSecs: {
+            type: "number",
+            description: "Video length in seconds (used for viral score)",
+          },
+          musicId: {
+            type: "string",
+            description: "TikTok music ID (used for viral score)",
+          },
+          trendingMusicIds: {
+            type: "array",
+            items: { type: "string" },
+            description: "From tiktok_find_trending_audio (optional — improves viral score)",
+          },
+        },
+      },
+      execute: async ({
+        videoUrl,
+        caption,
+        privacyLevel,
+        videoDurationSecs,
+        musicId,
+        trendingMusicIds,
+      }: {
+        videoUrl: string;
+        caption: string;
+        privacyLevel?: PrivacyLevel;
+        videoDurationSecs?: number;
+        musicId?: string;
+        trendingMusicIds?: string[];
+      }) => {
+        // Step 1: find optimal post time from account history
+        const videos = await client.fetchAllMyVideos(60);
+        const withTime = videos.filter(
+          (v) => v.create_time !== undefined && v.view_count !== undefined
+        );
+
+        let bestHourUTC = 14; // safe default (2pm UTC)
+        let optimalHours: number[] = [];
+
+        if (withTime.length >= 5) {
+          const buckets: Record<number, { total: number; count: number }> = {};
+          for (const v of withTime) {
+            const hour = new Date(v.create_time! * 1000).getUTCHours();
+            if (!buckets[hour]) buckets[hour] = { total: 0, count: 0 };
+            buckets[hour].total += v.view_count!;
+            buckets[hour].count += 1;
+          }
+          optimalHours = Object.entries(buckets)
+            .map(([h, { total, count }]) => ({ h: Number(h), avg: total / count }))
+            .sort((a, b) => b.avg - a.avg)
+            .map((x) => x.h);
+          bestHourUTC = optimalHours[0];
+        }
+
+        // Step 2: find next occurrence of bestHourUTC
+        const now = new Date();
+        const next = new Date(now);
+        next.setUTCMinutes(0, 0, 0);
+        next.setUTCHours(bestHourUTC);
+        if (next.getTime() <= Date.now()) {
+          next.setUTCDate(next.getUTCDate() + 1);
+        }
+
+        // Step 3: score the planned post
+        const prediction = predictViralScore({
+          caption,
+          musicId,
+          videoDurationSecs,
+          plannedPostHourUTC: bestHourUTC,
+          trendingMusicIds,
+          optimalPostHoursUTC: optimalHours,
+        });
+
+        // Step 4: queue it
+        const postInfo = makePostInfo(cfg, {
+          title: caption,
+          ...(privacyLevel ? { privacy_level: privacyLevel } : {}),
+          disable_duet: false,
+          disable_stitch: false,
+          disable_comment: false,
+        });
+
+        const queued = scheduler.schedule(videoUrl, postInfo, next.getTime());
+
+        return {
+          scheduledPostId: queued.id,
+          scheduledAt: next.toISOString(),
+          optimalHourUTC: bestHourUTC,
+          viralScore: prediction.overallScore,
+          viralRating: prediction.ratingLabel,
+          topSuggestions: prediction.topSuggestions,
+          message: `Queued for ${next.toUTCString()} — viral score ${prediction.overallScore}/100 (${prediction.rating})`,
+        };
+      },
+    },
+
+    {
+      name: "tiktok_auto_growth_report",
+      description:
+        "Generate a full account growth health report: profile stats, top/bottom " +
+        "video performers, optimal posting hours, engagement rate trend, and a " +
+        "prioritised action plan. No parameters required.",
+      parameters: { type: "object", properties: {} },
+      execute: async () => {
+        const [userRes, videos] = await Promise.all([
+          client.getUserInfo(),
+          client.fetchAllMyVideos(100),
+        ]);
+
+        const user = userRes.user;
+
+        if (!videos.length) {
+          return { error: "No videos found on this account." };
+        }
+
+        // Engagement & performance
+        const withMetrics = videos.map((v) => {
+          const views = v.view_count ?? 0;
+          const eng = (v.like_count ?? 0) + (v.comment_count ?? 0) + (v.share_count ?? 0);
+          return { ...v, engRate: views > 0 ? eng / views : 0 };
+        });
+
+        const totalViews = withMetrics.reduce((s, v) => s + (v.view_count ?? 0), 0);
+        const avgViews = Math.round(totalViews / videos.length);
+        const avgEngRate =
+          withMetrics.reduce((s, v) => s + v.engRate, 0) / videos.length;
+
+        const sorted = [...withMetrics].sort(
+          (a, b) => (b.view_count ?? 0) - (a.view_count ?? 0)
+        );
+
+        const topVideos = sorted.slice(0, 3).map((v) => ({
+          id: v.id,
+          title: (v.title ?? v.video_description ?? "").slice(0, 60),
+          views: v.view_count,
+          engagementRate: (v.engRate * 100).toFixed(1) + "%",
+          duration: v.duration,
+        }));
+
+        // Optimal posting hours
+        const withTime = withMetrics.filter(
+          (v) => v.create_time !== undefined && v.view_count !== undefined
+        );
+        const buckets: Record<number, { total: number; count: number }> = {};
+        for (const v of withTime) {
+          const hour = new Date(v.create_time! * 1000).getUTCHours();
+          if (!buckets[hour]) buckets[hour] = { total: 0, count: 0 };
+          buckets[hour].total += v.view_count!;
+          buckets[hour].count += 1;
+        }
+        const bestHours = Object.entries(buckets)
+          .map(([h, { total, count }]) => ({
+            hourUTC: Number(h),
+            avgViews: Math.round(total / count),
+          }))
+          .sort((a, b) => b.avgViews - a.avgViews)
+          .slice(0, 3);
+
+        // Action plan
+        const actions: string[] = [];
+        if (avgEngRate < 0.03) {
+          actions.push("Enable duets + stitches on future posts — derivative content resurfaces your originals.");
+        }
+        if (avgViews < 1000) {
+          actions.push("Run tiktok_find_trending_audio and post with a trending sound ASAP.");
+        }
+        if (bestHours.length) {
+          actions.push(
+            `Post at ${bestHours[0].hourUTC}:00 UTC (your best hour — avg ${bestHours[0].avgViews} views).`
+          );
+        }
+        actions.push("Use tiktok_predict_viral_score before every post to catch weak spots.");
+        actions.push(
+          "Run tiktok_find_viral_videos for your niche to identify trending content formats to replicate."
+        );
+
+        return {
+          account: {
+            username: user.display_name ?? user.open_id,
+            followers: user.follower_count,
+            totalLikes: user.likes_count,
+            videoCount: user.video_count,
+          },
+          performance: {
+            videosAnalyzed: videos.length,
+            totalViews,
+            averageViewsPerVideo: avgViews,
+            averageEngagementRate: (avgEngRate * 100).toFixed(2) + "%",
+          },
+          topVideos,
+          optimalPostingHoursUTC: bestHours,
+          scheduledPostsPending: scheduler.list("PENDING").length,
+          actionPlan: actions,
         };
       },
     },

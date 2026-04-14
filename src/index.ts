@@ -2,6 +2,7 @@ import { definePluginEntry } from "openclaw/plugin-sdk";
 import { TokenManager } from "./token-manager.js";
 import { TikTokApiClient } from "./api-client.js";
 import { buildTools } from "./tools.js";
+import { PostScheduler } from "./scheduler.js";
 import { ConfigSchema, type Config } from "./config-schema.js";
 
 export default definePluginEntry({
@@ -20,7 +21,15 @@ export default definePluginEntry({
       cfg.pollTimeoutMs ?? 120_000
     );
 
-    const tools = buildTools(client, cfg);
+    // Scheduler runs as a background service — checks for due posts every 30s
+    const scheduler = new PostScheduler(client);
+
+    api.registerService({
+      id: "tiktok-scheduler",
+      start: () => scheduler.start(),
+    });
+
+    const tools = buildTools(client, cfg, scheduler);
     for (const tool of tools) {
       api.registerTool(tool);
     }

@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { TokenManager } from "./token-manager.js";
 import { TikTokApiClient } from "./api-client.js";
+import { PostScheduler } from "./scheduler.js";
+import { predictViralScore } from "./viral-predictor.js";
 import { buildTools } from "./tools.js";
 import type { Config } from "./config-schema.js";
 
@@ -246,9 +248,13 @@ describe("TikTokApiClient", () => {
 // ── buildTools ─────────────────────────────────────────────────────────────────
 
 describe("buildTools", () => {
+  function makeScheduler() {
+    return new PostScheduler(makeClient(), 999_999); // very long interval — never auto-fires in tests
+  }
+
   it("returns core tools without research tools when disabled", () => {
     const client = makeClient();
-    const tools = buildTools(client, { ...CFG, enableResearchTools: false });
+    const tools = buildTools(client, { ...CFG, enableResearchTools: false }, makeScheduler());
     const names = tools.map((t) => t.name);
 
     expect(names).toContain("tiktok_get_user_info");
@@ -267,7 +273,7 @@ describe("buildTools", () => {
 
   it("includes research tools when enableResearchTools is true", () => {
     const client = makeClient();
-    const tools = buildTools(client, { ...CFG, enableResearchTools: true });
+    const tools = buildTools(client, { ...CFG, enableResearchTools: true }, makeScheduler());
     const names = tools.map((t) => t.name);
 
     expect(names).toContain("tiktok_get_video_comments");
@@ -276,7 +282,7 @@ describe("buildTools", () => {
 
   it("tiktok_post_photo rejects 0 images", async () => {
     const client = makeClient();
-    const tools = buildTools(client, CFG);
+    const tools = buildTools(client, CFG, makeScheduler());
     const photo = tools.find((t) => t.name === "tiktok_post_photo")!;
 
     await expect(photo.execute({ photoUrls: [] })).rejects.toThrow(
@@ -286,7 +292,7 @@ describe("buildTools", () => {
 
   it("tiktok_post_photo rejects > 35 images", async () => {
     const client = makeClient();
-    const tools = buildTools(client, CFG);
+    const tools = buildTools(client, CFG, makeScheduler());
     const photo = tools.find((t) => t.name === "tiktok_post_photo")!;
 
     const urls = Array.from({ length: 36 }, (_, i) => `https://ex.com/${i}.jpg`);
@@ -297,7 +303,7 @@ describe("buildTools", () => {
 
   it("tiktok_get_video rejects > 20 IDs", async () => {
     const client = makeClient();
-    const tools = buildTools(client, CFG);
+    const tools = buildTools(client, CFG, makeScheduler());
     const getVideo = tools.find((t) => t.name === "tiktok_get_video")!;
 
     const ids = Array.from({ length: 21 }, (_, i) => `id-${i}`);
@@ -308,7 +314,7 @@ describe("buildTools", () => {
 
   it("tiktok_post_video_url uses defaultPrivacyLevel from config", async () => {
     const client = makeClient();
-    const tools = buildTools(client, { ...CFG, defaultPrivacyLevel: "FOLLOWER_OF_CREATOR" });
+    const tools = buildTools(client, { ...CFG, defaultPrivacyLevel: "FOLLOWER_OF_CREATOR" }, makeScheduler());
     const postVideo = tools.find((t) => t.name === "tiktok_post_video_url")!;
 
     global.fetch = vi.fn().mockResolvedValueOnce(
@@ -321,5 +327,175 @@ describe("buildTools", () => {
       (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body as string
     );
     expect(body.post_info.privacy_level).toBe("FOLLOWER_OF_CREATOR");
+  });
+});
+
+// ── Viral Predictor ────────────────────────────────────────────────────────────
+
+describe("predictViralScore", () => {
+  it("returns 5 factors summing to overallScore", () => {
+    const result = predictViralScore({ caption: "Hello world #test" });
+    expect(result.factors).toHaveLength(5);
+    const factorSum = result.factors.reduce((s, f) => s + f.score, 0);
+    expect(factorSum).toBe(result.overallScore);
+  });
+
+  it("rates a strong post as HIGH or VERY_HIGH", () => {
+    const result = predictViralScore({
+      caption:
+        "Wait for it... 3 tips that changed my life 🔥 #viral #fyp #lifehacks",
+      musicId: "trending-music-1",
+      videoDurationSecs: 12,
+      plannedPostHourUTC: 14,
+      trendingMusicIds: ["trending-music-1", "trending-music-2"],
+      optimalPostHoursUTC: [14, 19, 12],
+    });
+    expect(["HIGH", "VERY_HIGH"]).toContain(result.rating);
+    expect(result.overallScore).toBeGreaterThan(59);
+  });
+
+  it("rates a weak post as LOW or MEDIUM", () => {
+    const result = predictViralScore({
+      caption: "hi",
+      videoDurationSecs: 300,
+      plannedPostHourUTC: 3,
+      trendingMusicIds: ["trending-1"],
+      optimalPostHoursUTC: [14, 19, 12],
+    });
+    expect(["LOW", "MEDIUM"]).toContain(result.rating);
+    expect(result.overallScore).toBeLessThan(60);
+  });
+
+  it("detects delayed reveal format", () => {
+    const result = predictViralScore({
+      caption: "Stay until the end for the reveal #shocking #fyp",
+    });
+    const formatFactor = result.factors.find((f) => f.factor === "Content Format")!;
+    expect(formatFactor.score).toBeGreaterThanOrEqual(18);
+  });
+
+  it("detects tutorial/save-worthy format", () => {
+    const result = predictViralScore({
+      caption: "How to double your income in 30 days — step by step guide #tutorial",
+    });
+    const formatFactor = result.factors.find((f) => f.factor === "Content Format")!;
+    expect(formatFactor.score).toBeGreaterThanOrEqual(16);
+  });
+
+  it("gives max audio score for #1 trending music", () => {
+    const result = predictViralScore({
+      caption: "test",
+      musicId: "music-abc",
+      trendingMusicIds: ["music-abc", "music-xyz"],
+    });
+    const audioFactor = result.factors.find((f) => f.factor === "Audio / Sound Trend")!;
+    expect(audioFactor.score).toBe(20);
+  });
+
+  it("gives minimum audio score for non-trending music when list is provided", () => {
+    const result = predictViralScore({
+      caption: "test",
+      musicId: "unknown-music",
+      trendingMusicIds: ["music-1", "music-2"],
+    });
+    const audioFactor = result.factors.find((f) => f.factor === "Audio / Sound Trend")!;
+    expect(audioFactor.score).toBeLessThanOrEqual(8);
+  });
+
+  it("awards top duration score for 7-15s videos", () => {
+    const result = predictViralScore({ caption: "test", videoDurationSecs: 10 });
+    const dur = result.factors.find((f) => f.factor === "Video Length (Completion)")!;
+    expect(dur.score).toBe(20);
+  });
+
+  it("penalises very long videos", () => {
+    const result = predictViralScore({ caption: "test", videoDurationSecs: 200 });
+    const dur = result.factors.find((f) => f.factor === "Video Length (Completion)")!;
+    expect(dur.score).toBeLessThanOrEqual(6);
+  });
+
+  it("includes topSuggestions array", () => {
+    const result = predictViralScore({ caption: "test" });
+    expect(Array.isArray(result.topSuggestions)).toBe(true);
+    expect(result.topSuggestions.length).toBeGreaterThan(0);
+  });
+});
+
+// ── PostScheduler ──────────────────────────────────────────────────────────────
+
+describe("PostScheduler", () => {
+  it("schedules a post and returns PENDING", () => {
+    const scheduler = new PostScheduler(makeClient(), 999_999);
+    const future = Date.now() + 60_000;
+    const post = scheduler.schedule(
+      "https://example.com/v.mp4",
+      { privacy_level: "SELF_ONLY" },
+      future
+    );
+    expect(post.status).toBe("PENDING");
+    expect(post.id).toBeTruthy();
+    expect(post.scheduledAtMs).toBe(future);
+  });
+
+  it("throws when scheduling in the past", () => {
+    const scheduler = new PostScheduler(makeClient(), 999_999);
+    expect(() =>
+      scheduler.schedule(
+        "https://example.com/v.mp4",
+        { privacy_level: "SELF_ONLY" },
+        Date.now() - 1000
+      )
+    ).toThrow("future");
+  });
+
+  it("cancels a PENDING post", () => {
+    const scheduler = new PostScheduler(makeClient(), 999_999);
+    const post = scheduler.schedule(
+      "https://example.com/v.mp4",
+      { privacy_level: "SELF_ONLY" },
+      Date.now() + 60_000
+    );
+    const cancelled = scheduler.cancel(post.id);
+    expect(cancelled.status).toBe("CANCELLED");
+    expect(scheduler.get(post.id)?.status).toBe("CANCELLED");
+  });
+
+  it("throws when cancelling a non-PENDING post", () => {
+    const scheduler = new PostScheduler(makeClient(), 999_999);
+    const post = scheduler.schedule(
+      "https://example.com/v.mp4",
+      { privacy_level: "SELF_ONLY" },
+      Date.now() + 60_000
+    );
+    scheduler.cancel(post.id);
+    expect(() => scheduler.cancel(post.id)).toThrow("CANCELLED");
+  });
+
+  it("list() returns all posts sorted by scheduledAt", () => {
+    const scheduler = new PostScheduler(makeClient(), 999_999);
+    const t1 = Date.now() + 120_000;
+    const t2 = Date.now() + 60_000;
+    scheduler.schedule("https://example.com/a.mp4", { privacy_level: "SELF_ONLY" }, t1);
+    scheduler.schedule("https://example.com/b.mp4", { privacy_level: "SELF_ONLY" }, t2);
+    const list = scheduler.list();
+    expect(list[0].scheduledAtMs).toBe(t2);
+    expect(list[1].scheduledAtMs).toBe(t1);
+  });
+
+  it("list() filters by status", () => {
+    const scheduler = new PostScheduler(makeClient(), 999_999);
+    const post = scheduler.schedule(
+      "https://example.com/v.mp4",
+      { privacy_level: "SELF_ONLY" },
+      Date.now() + 60_000
+    );
+    scheduler.cancel(post.id);
+    expect(scheduler.list("PENDING")).toHaveLength(0);
+    expect(scheduler.list("CANCELLED")).toHaveLength(1);
+  });
+
+  it("throws when cancelling unknown id", () => {
+    const scheduler = new PostScheduler(makeClient(), 999_999);
+    expect(() => scheduler.cancel("nonexistent-id")).toThrow("No scheduled post found");
   });
 });

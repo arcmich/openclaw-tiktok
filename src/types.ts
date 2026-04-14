@@ -142,6 +142,42 @@ export interface ResearchVideoResponse {
   search_id: string;
 }
 
+// ── Research: user social graph ───────────────────────────────────────────────
+
+export interface ResearchUserProfile {
+  username?: string;
+  display_name?: string;
+  bio_description?: string;
+  avatar_url?: string;
+  is_verified?: boolean;
+  follower_count?: number;
+  following_count?: number;
+  likes_count?: number;
+  video_count?: number;
+}
+
+export interface UserFollowersResponse {
+  user_followers: ResearchUserProfile[];
+  cursor: number;
+  has_more: boolean;
+}
+
+export interface UserFollowingResponse {
+  user_following: ResearchUserProfile[];
+  cursor: number;
+  has_more: boolean;
+}
+
+export interface UserLikedVideosResponse {
+  user_liked_videos: ResearchVideo[];
+  cursor: number;
+  has_more: boolean;
+}
+
+export interface PinnedVideosResponse {
+  pinned_videos_list: ResearchVideo[];
+}
+
 // ── OAuth token ───────────────────────────────────────────────────────────────
 
 export interface TokenResponse {

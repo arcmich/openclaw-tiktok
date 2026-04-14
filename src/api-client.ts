@@ -11,6 +11,11 @@ import type {
   PublishStatus,
   CommentListResponse,
   ResearchVideoResponse,
+  ResearchVideo,
+  UserFollowersResponse,
+  UserFollowingResponse,
+  UserLikedVideosResponse,
+  PinnedVideosResponse,
   TokenResponse,
 } from "./types.js";
 
@@ -31,7 +36,12 @@ const COMMENT_FIELDS =
 
 const RESEARCH_VIDEO_FIELDS =
   "id,video_description,create_time,region_code,share_count,view_count," +
-  "like_count,comment_count,music_id,hashtag_names,username,effect_ids,voice_to_text";
+  "like_count,comment_count,music_id,hashtag_names,username,effect_ids," +
+  "voice_to_text,video_duration";
+
+const RESEARCH_USER_FIELDS =
+  "username,display_name,bio_description,avatar_url,is_verified," +
+  "follower_count,following_count,likes_count,video_count";
 
 export class TikTokApiClient {
   constructor(
@@ -285,6 +295,111 @@ export class TikTokApiClient {
       },
       { fields: RESEARCH_VIDEO_FIELDS }
     );
+  }
+
+  // ── Research: social graph ────────────────────────────────────────────────
+
+  async getUserFollowers(
+    username: string,
+    maxCount = 100,
+    cursor = 0
+  ): Promise<UserFollowersResponse> {
+    return this.post(
+      "/research/user/followers/",
+      { username, max_count: Math.min(maxCount, 100), cursor },
+      { fields: RESEARCH_USER_FIELDS }
+    );
+  }
+
+  async getUserFollowing(
+    username: string,
+    maxCount = 100,
+    cursor = 0
+  ): Promise<UserFollowingResponse> {
+    return this.post(
+      "/research/user/following/",
+      { username, max_count: Math.min(maxCount, 100), cursor },
+      { fields: RESEARCH_USER_FIELDS }
+    );
+  }
+
+  async getUserLikedVideos(
+    username: string,
+    maxCount = 20,
+    cursor = 0
+  ): Promise<UserLikedVideosResponse> {
+    return this.post(
+      "/research/user/liked_videos/",
+      { username, max_count: Math.min(maxCount, 100), cursor },
+      { fields: RESEARCH_VIDEO_FIELDS }
+    );
+  }
+
+  async getUserPinnedVideos(username: string): Promise<PinnedVideosResponse> {
+    return this.post(
+      "/research/user/pinned_videos/",
+      { username },
+      { fields: RESEARCH_VIDEO_FIELDS }
+    );
+  }
+
+  // ── Research: viral / trending discovery ──────────────────────────────────
+
+  /**
+   * Find high-performing videos in a niche using the Research API.
+   * Filters by hashtag and a minimum view-count threshold.
+   */
+  async findViralVideos(
+    hashtag: string,
+    minViewCount: number,
+    startDate: string,
+    endDate: string,
+    regionCode?: string,
+    maxCount = 20,
+    cursor = 0,
+    searchId = ""
+  ): Promise<ResearchVideoResponse> {
+    const conditions: Array<{ operation: string; field_name: string; field_values: string[] }> = [
+      { operation: "EQ", field_name: "hashtag_name", field_values: [hashtag] },
+      { operation: "GTE", field_name: "view_count", field_values: [String(minViewCount)] },
+    ];
+
+    if (regionCode) {
+      conditions.push({ operation: "EQ", field_name: "region_code", field_values: [regionCode] });
+    }
+
+    return this.post(
+      "/research/video/query/",
+      {
+        query: { and: conditions },
+        start_date: startDate,
+        end_date: endDate,
+        max_count: Math.min(maxCount, 100),
+        cursor,
+        ...(searchId ? { search_id: searchId } : {}),
+      },
+      { fields: RESEARCH_VIDEO_FIELDS }
+    );
+  }
+
+  /**
+   * Paginate through the authenticated user's own video list up to maxTotal.
+   * Used internally by performance analysis tools.
+   */
+  async fetchAllMyVideos(maxTotal = 100): Promise<TikTokVideo[]> {
+    const videos: TikTokVideo[] = [];
+    let cursor = 0;
+    let hasMore = true;
+
+    while (hasMore && videos.length < maxTotal) {
+      const batchSize = Math.min(20, maxTotal - videos.length);
+      const res = await this.listVideos(batchSize, cursor);
+      videos.push(...res.videos);
+      hasMore = res.has_more;
+      cursor = res.cursor;
+    }
+
+    return videos;
   }
 
   // ── Token management ──────────────────────────────────────────────────────

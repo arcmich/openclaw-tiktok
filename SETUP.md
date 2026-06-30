@@ -197,3 +197,19 @@ the OAuth flow again from Step 3 to get new tokens.
   TikTok's content review. Test with `defaultPrivacyLevel: "SELF_ONLY"` and apply
   for production access once your integration is verified.
 - Videos must comply with [TikTok Community Guidelines](https://www.tiktok.com/community-guidelines).
+
+## 11 — Optional TweetClaw source packets
+
+When a TikTok brief starts from public X/Twitter conversation context, keep the
+source collection separate from TikTok publishing:
+
+1. Use TweetClaw to export the relevant public posts, replies, author handles,
+   URLs, and visible engagement metrics as an evidence packet.
+2. Summarize that packet into the creative brief used by this TikTok plugin.
+3. Review the brief and generated media before calling any posting tool.
+4. Keep `defaultPrivacyLevel: "SELF_ONLY"` for test publishes until the TikTok
+   account and app review are production-ready.
+
+TweetClaw does not replace TikTok OAuth, TikTok permissions, or this plugin's
+privacy controls. Treat it as X/Twitter source evidence for ideation and review,
+not as authority to publish TikTok content automatically.
